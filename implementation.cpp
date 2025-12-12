@@ -22,6 +22,7 @@ static void set_file_descriptor(void *args, int fd)
 
 static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 {
+	if (!stbuf) return -1;
 	struct Args *fs = (struct Args*)args;
 	printf("GETATTR %d\n", block_num);
 
@@ -87,6 +88,7 @@ static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 
 static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_callback_t cb)
 {
+	if (!buf) return -1;
 	struct Args *fs = (struct Args*)args;
 
 	//assume given block_num will always be an inode
@@ -97,6 +99,7 @@ static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_c
 
 	while (bnum) {
 		readblock(fs->fd, block_buf, bnum);
+		//printf("read block num %d\n", bnum);
 		memcpy(&type_code, &block_buf[0], 4);
 		int entry_header_start;
 		if (type_code == 2) {
@@ -125,27 +128,30 @@ static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_c
 		uint32_t dir_entry_inode;
 		char *dir_entry_name_buf = (char *) calloc(4086, sizeof(char)); //hard-coded max length of name
 		unsigned char *dir_entry = &block_buf[entry_header_start];
+		//int entrycount = 0;
 		
 		memcpy(&dir_entry_len, &dir_entry[0], 2);
 		while (dir_entry_len > 0) {
+			//printf("reading entry %d, len %d, starting point %d\n", ++entrycount, dir_entry_len, entry_header_start);
 			memcpy(&dir_entry_inode, &dir_entry[2], 4);
 			memcpy(dir_entry_name_buf, &dir_entry[6], (size_t) dir_entry_len);
-			dir_entry_name_buf[dir_entry_len] = 0;
+			dir_entry_name_buf[dir_entry_len-6] = 0;
 
 			cb(buf, dir_entry_name_buf, dir_entry_inode);
 			
-			entry_header_start += dir_entry_len + 6;
+			entry_header_start += dir_entry_len;
 			dir_entry = &block_buf[entry_header_start];
-			if (entry_header_start < 4092) //let's see if there are issues with this
+			if (entry_header_start < 4092) {//let's see if there are issues with this
 				memcpy(&dir_entry_len, &dir_entry[0], 2);
-			else
+			}
+			else {
 				free(dir_entry_name_buf);
+				//printf("finished reading at block num %d\n", bnum);
 				break;
+			}
 		}
-
 		bnum = next_extents;
 	}
-
     return 0;
 }
 
@@ -160,14 +166,14 @@ static int myopen(void *args, uint32_t block_num)
 		//throw error
 		return -1;
 	}
-
     return 0;
 }
 
 static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t offset)
 {
+	if ((!size) || (!buf)) return 0;
+	
 	struct Args *fs = (struct Args*)args;
-	int res = -1;
 
 	int first_block = 1;
 	unsigned char block_buf[4096];
@@ -178,6 +184,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 	unsigned long remaining_size = size - size_read;
 
 	while (bnum) {
+		printf("Remaining size: %d\n", (int)remaining_size);
 		readblock(fs->fd, block_buf, bnum);
 		memcpy(&type_code, &block_buf[0], 4);
 		int contents_start;
@@ -211,7 +218,12 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 		
 		//if offset in file not located in current block, go to next
 		if (contents_start + running_offset >= 4092) {
-			running_offset -= (4096 - contents_start);
+			if (next_extents == 0) {
+				printf("offset not in file\n");
+				return 0;
+			}
+			printf("offset not in current block %d, going to next block %d\n", bnum, next_extents);
+			running_offset -= (4092 - contents_start);
 			bnum = next_extents;
 			continue;
 		}
@@ -222,6 +234,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 				&block_buf[contents_start+running_offset], 
 				(size_t) 4092-(contents_start+running_offset));
 			size_read += 4092-(contents_start+running_offset);
+			printf("read %d bytes from block %d, continue\n", 4092-(contents_start+running_offset), bnum);
 			running_offset = 0; //read from start of next block
 		}
 		else { //last block to read
@@ -229,7 +242,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 				&block_buf[contents_start+running_offset], 
 				(size_t) remaining_size);
 			size_read = size;
-			res = 0;
+			printf("read %d bytes from block %d, return\n", (int)remaining_size, bnum);
 			break;
 		}
 
@@ -237,7 +250,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 		bnum = next_extents;
 	}
 
-    return res;
+    return size_read;
 }
 
 static int myreadlink(void *args, uint32_t block_num, char *buf, size_t size)
@@ -268,11 +281,11 @@ static int myreadlink(void *args, uint32_t block_num, char *buf, size_t size)
 static uint32_t root_node(void *args)
 {
 	struct Args *fs = (struct Args*)args;
-	uint32_t *root_num;
-	unsigned char super[10240];
+	uint32_t root_num;
+	unsigned char super[4096];
 	readblock(fs->fd, super, 0);
-	root_num = (uint32_t *)(super + 4088);
-	return *root_num;
+	memcpy(&root_num, &super[4088], 4);
+	return root_num;
 }
 
 #ifdef  __cplusplus
