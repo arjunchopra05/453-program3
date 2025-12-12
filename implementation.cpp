@@ -27,28 +27,37 @@ static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 
 	unsigned char block_buf[4096];
 	readblock(fs->fd, block_buf, block_num);
-	
-	uint32_t inode_num = *((uint32_t *)&block_buf[4]);
-	unsigned char inode_buf[4096];
-	readblock(fs->fd, inode_buf, inode_num);
+	uint32_t inode_num;
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code == 4) {
+		inode_num = *((uint32_t *)&block_buf[4]);
+		readblock(fs->fd, block_buf, inode_num);
+	}
+	else if (type_code == 2) {
+		inode_num = block_num;
+	}
+	else {
+		return -1;
+	}
 
 	uint16_t mode, nlink;
 	uint32_t uid, gid, rdev, atime_s, atime_ns, mtime_s, mtime_ns, ctime_s, ctime_ns;
 	uint64_t size, blocks;
 
-	memcpy(&mode, &inode_buf[4], 2);
-	memcpy(&nlink, &inode_buf[6], 2);
-	memcpy(&uid, &inode_buf[8], 4);
-	memcpy(&gid, &inode_buf[12], 4);
-	memcpy(&rdev, &inode_buf[16], 4);
-	memcpy(&atime_s, &inode_buf[24], 4);
-	memcpy(&atime_ns, &inode_buf[28], 4);
-	memcpy(&mtime_s, &inode_buf[32], 4);
-	memcpy(&mtime_ns, &inode_buf[36], 4);
-	memcpy(&ctime_s, &inode_buf[40], 4);
-	memcpy(&ctime_ns, &inode_buf[44], 4);
-	memcpy(&size, &inode_buf[48], 8);
-	memcpy(&blocks, &inode_buf[56], 8);
+	memcpy(&mode, &block_buf[4], 2);
+	memcpy(&nlink, &block_buf[6], 2);
+	memcpy(&uid, &block_buf[8], 4);
+	memcpy(&gid, &block_buf[12], 4);
+	memcpy(&rdev, &block_buf[16], 4);
+	memcpy(&atime_s, &block_buf[24], 4);
+	memcpy(&atime_ns, &block_buf[28], 4);
+	memcpy(&mtime_s, &block_buf[32], 4);
+	memcpy(&mtime_ns, &block_buf[36], 4);
+	memcpy(&ctime_s, &block_buf[40], 4);
+	memcpy(&ctime_ns, &block_buf[44], 4);
+	memcpy(&size, &block_buf[48], 8);
+	memcpy(&blocks, &block_buf[56], 8);
 
 	timespec atim, mtim, ctim;
 	atim.tv_sec = atime_s;
