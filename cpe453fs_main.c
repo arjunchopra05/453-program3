@@ -495,8 +495,8 @@ static int cpe453fs_rename(const char *from, const char *to)
 	   res = (*fs_ops->unlink)(fs_ops->arg, to_par, to_rem);
       if (res < 0)
          return res;
-   }
-   else if (res != -ENOENT)
+    }//add one space
+    else if (res != -ENOENT)//add one space
 		return res;
 	res = lookup_block_num(from, &from_bn, &from_rem, NULL);
 	if (res < 0)
