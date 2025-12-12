@@ -27,6 +27,7 @@ static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 
 	unsigned char block_buf[4096];
 	readblock(fs->fd, block_buf, block_num);
+	
 	uint32_t inode_num;
 	uint32_t type_code;
 	memcpy(&type_code, &block_buf[0], 4);
