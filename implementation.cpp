@@ -184,7 +184,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 	unsigned long remaining_size = size - size_read;
 
 	while (bnum) {
-		printf("Remaining size: %d\n", (int)remaining_size);
+		//printf("Remaining size: %d\n", (int)remaining_size);
 		readblock(fs->fd, block_buf, bnum);
 		memcpy(&type_code, &block_buf[0], 4);
 		int contents_start;
@@ -219,10 +219,10 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 		//if offset in file not located in current block, go to next
 		if (contents_start + running_offset >= 4092) {
 			if (next_extents == 0) {
-				printf("offset not in file\n");
+				//printf("offset not in file\n");
 				return 0;
 			}
-			printf("offset not in current block %d, going to next block %d\n", bnum, next_extents);
+			//printf("offset not in current block %d, going to next block %d\n", bnum, next_extents);
 			running_offset -= (4092 - contents_start);
 			bnum = next_extents;
 			continue;
@@ -234,7 +234,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 				&block_buf[contents_start+running_offset], 
 				(size_t) 4092-(contents_start+running_offset));
 			size_read += 4092-(contents_start+running_offset);
-			printf("read %d bytes from block %d, continue\n", 4092-(contents_start+running_offset), bnum);
+			//printf("read %d bytes from block %d, continue\n", 4092-(contents_start+running_offset), bnum);
 			running_offset = 0; //read from start of next block
 		}
 		else { //last block to read
@@ -242,7 +242,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 				&block_buf[contents_start+running_offset], 
 				(size_t) remaining_size);
 			size_read = size;
-			printf("read %d bytes from block %d, return\n", (int)remaining_size, bnum);
+			//printf("read %d bytes from block %d, return\n", (int)remaining_size, bnum);
 			break;
 		}
 
