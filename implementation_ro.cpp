@@ -14,107 +14,6 @@ struct Args
 	int fd;
 };
 
-// --------------------Read-write------------------------------------
-
-/* helper functions for read-write section only */
-void *allocate_block(void *args) {
-    struct Args *fs = (struct Args*)args;
-    void *new_block;
-    int new_block_num;
-    return new_block; //or, return new block num?
-}
-
-void free_block(void *args, uint32_t prev_block_num, uint32_t block_num) {
-    struct Args *fs = (struct Args*)args;
-    return;
-}
-
-int add_dir_entry(void *args, uint32_t ino_dir, uint16_t len, uint32_t ino_map, unsigned char *name) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int remove_dir_entry(void *args, uint32_t ino_dir, uint32_t inode_map) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int truncate(void *args, uint32_t ino_file, uint64_t target_size) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-ssize_t write(void *args, uint32_t ino_file, const char *buff, size_t wr_len, off_t wr_offset) {
-    struct Args *fs = (struct Args*)args;
-    ssize_t bytes_written;
-    return bytes_written;
-}
-
-/* actual read-write implementation */
-int my_chmod(void *args, uint32_t block_num, mode_t new_mode) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_chown(void *args, uint32_t block_num, uid_t new_uid, gid_t new_gid) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_utimens(void *args, uint32_t block_num, const struct timespec tv[2]) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_rmdir(void *args, uint32_t block_num, const char *name) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_unlink(void *args, uint32_t block_num, const char *name) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_mknod(void *args, uint32_t parent_block, const char *name, mode_t new_mode, dev_t new_dev) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_symlink(void *args, uint32_t parent_block, const char *name, const char *link_dest) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_mkdir(void *args, uint32_t parent_block, const char *name, mode_t new_mode) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_link(void *args, uint32_t parent_block, const char *name, uint32_t dest_block) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_rename(void *args, uint32_t old_parent, const char *old_name, uint32_t new_parent, const char *new_name) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_truncate(void *args, uint32_t block_num, off_t new_size) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
-
-int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset) {
-    struct Args *fs = (struct Args*)args;
-    int bytes_written;
-    return bytes_written;
-}
-
-
-// --------------------Read-only-------------------------------------
-
 static void set_file_descriptor(void *args, int fd)
 {
 	struct Args *fs = (struct Args*)args;
@@ -289,6 +188,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 		readblock(fs->fd, block_buf, bnum);
 		memcpy(&type_code, &block_buf[0], 4);
 		int contents_start;
+		
 		if (type_code == 2) {
 			if (first_block) first_block = 0;
 			else return -1; //this should never happen
@@ -407,19 +307,6 @@ struct cpe453fs_ops *CPE453_get_operations(void)
 	ops.readlink = myreadlink;
 	ops.root_node = root_node;
 	ops.set_file_descriptor = set_file_descriptor;
-
-	ops.chmod = my_chmod;
-	ops.chown = my_chown;
-	ops.utimens = my_utimens;
-	ops.rmdir = my_rmdir;
-	ops.unlink = my_unlink;
-	ops.mknod = my_mknod;
-	ops.symlink = my_symlink;
-	ops.mkdir = my_mkdir;
-	ops.link = my_link;
-	ops.rename = my_rename;
-	ops.truncate = my_truncate;
-	ops.write = my_write;
 
 	return &ops;
 }
