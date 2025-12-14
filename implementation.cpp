@@ -21,6 +21,7 @@ struct Args
 #define M_s 2
 #define C_s 1
 #define AMC_s 7
+#define MC_s 3
 void update_tim(unsigned char *block_buf, uint8_t field) {
 	printf("HELPER: update time\n");
 	struct timespec now;
@@ -262,86 +263,6 @@ uint32_t remove_dir_entry(void *args, uint32_t parent_dir, const char *name) {
 }
 
 /* actual read-write implementation */
-/*int my_truncate(void *args, uint32_t block_num, off_t new_size) {
-	printf("MYTRUNCATE, block_num=%u, new_size=%ld\n", block_num, new_size);
-    struct Args *fs = (struct Args*)args;
-	if (!block_num) return -1;
-	else if (new_size <= 0) return 0;
-	unsigned char block_buf[4096];
-	readblock(fs->fd, block_buf, block_num);
-	uint32_t type_code;
-	uint16_t mode;
-	memcpy(&mode, &block_buf[4], 2);
-	uint64_t curr_size;
-	uint64_t curr_blocks;
-	memcpy(&curr_size, &block_buf[48], 8);
-	memcpy(&curr_blocks, &block_buf[56], 8);
-	uint64_t new_blocks = 1;
-	uint64_t new_sz = (uint64_t) new_size;
-	int extra = 68;
-	while ((new_blocks * 4096) < (new_sz + extra)) {
-		new_blocks++;
-		if (mode | S_IFDIR) extra += 8;
-		else extra += 12;
-	}
-
-	if (curr_blocks <= new_blocks) {
-		printf("shrinking from %d blocks to %d blocks\n", (int)curr_blocks, (int)new_blocks);
-		uint32_t bnum = block_num;
-		uint32_t next_extents;
-		uint64_t block_count = 1;
-		while (block_count <= new_blocks) {
-			readblock(fs->fd, block_buf, bnum);
-			memcpy(&next_extents, &block_buf[4092], 4);
-			bnum = next_extents;
-			block_count++;
-		}
-		if (bnum) free_block(args, bnum);
-	}
-	else {
-		printf("growing from %d blocks to %d blocks\n", (int)curr_blocks, (int)new_blocks);
-		uint32_t bnum = block_num;
-		uint32_t next_extents;
-		uint32_t new_bnum;
-		unsigned char new_block_buf[4096];
-		uint64_t block_count = 1;
-		while (block_count <= new_blocks) {
-			readblock(fs->fd, block_buf, bnum);
-			if (block_count <= curr_blocks) {
-				memcpy(&next_extents, &block_buf[4092], 4);
-				if (next_extents) bnum = next_extents;
-			}
-			else if (block_count > curr_blocks) {
-				new_bnum = allocate_block(args);
-				memcpy(&block_buf[4092], &new_bnum, 4);
-				readblock(fs->fd, new_block_buf, new_bnum);
-				if (mode | S_IFDIR) {
-					type_code = 3;
-					memcpy(&new_block_buf[0], &type_code, 4);
-				}
-				else {
-					type_code = 4;
-					memcpy(&new_block_buf[0], &type_code, 4);
-					memcpy(&new_block_buf[4], &block_num, 4);
-				}
-				next_extents = 0;
-				memcpy(&new_block_buf[4092], &next_extents, 4);
-				writeblock(fs->fd, new_block_buf, new_bnum);
-				writeblock(fs->fd, block_buf, bnum);
-				bnum = new_bnum;
-			}
-			block_count++;
-		}
-	}
-
-	readblock(fs->fd, block_buf, block_num);
-	memcpy(&block_buf[48], &new_sz, 8);
-	memcpy(&block_buf[56], &new_blocks, 8);
-	update_tim(block_buf, AMC_s);
-	writeblock(fs->fd, block_buf, block_num);
-
-    return 0;
-}*/
 
 int my_truncate(void *args, uint32_t block_num, off_t new_size) {
     struct Args *fs = (struct Args*)args;
@@ -349,29 +270,29 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
 
     printf("TRUNCATE inode=%u new_size=%ld\n", block_num, (long)new_size);
 
-    unsigned char ino[4096];
-    readblock(fd, ino, block_num);
+    unsigned char block_buf[4096];
+    readblock(fd, block_buf, block_num);
 
-    uint32_t block_type;
-    memcpy(&block_type, ino, 4);
-    if (block_type != 2){
+    uint32_t type_code;
+    memcpy(&type_code, &block_buf[0], 4);
+    if (type_code != 2){
         return -EINVAL;
     }
     uint16_t mode;
-    memcpy(&mode, ino + 4, 2);
+    memcpy(&mode, &block_buf[4], 2);
     if (!S_ISREG(mode)){
-        perror("mytruncate(): inode is not of type file");
-        return -EINVAL; // QUESTION: Can truncate be done on directories?
+        perror("truncate: inode is not of type file");
+        return -EINVAL;
     }
 
     uint64_t curr_size;
-    memcpy(&curr_size, ino + 48, 8);
+    memcpy(&curr_size, &block_buf[48], 8);
 
     uint64_t curr_blocks;
-    memcpy(&curr_blocks, ino + 56, 8);
+    memcpy(&curr_blocks, &block_buf[56], 8);
 
     uint32_t first_extents;
-    memcpy(&first_extents, ino + 4092, 4);
+    memcpy(&first_extents, &block_buf[4092], 4);
 
     const uint64_t FIRST = 4028;
     const uint64_t EXT = 4084;
@@ -404,7 +325,7 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             while (last_ext != 0){
                 readblock(fd, extent_buff, last_ext);
                 uint32_t next;
-                memcpy(&next, extent_buff + 4092, 4);
+                memcpy(&next, &extent_buff[4092], 4);
                 if (next == 0){
                     break;
                 }
@@ -426,19 +347,19 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             memcpy(new_buff, &type4, 4);
 
             uint32_t next = 0;
-            memcpy(new_buff + 4092, &next, 4);
+            memcpy(&new_buff[4092], &next, 4);
             writeblock(fd, new_buff, new_block);
 
             if (curr_extents == 0 && i == 0){
                 // no extents yet
                 first_extents = new_block;
-                memcpy(ino + 4092, &first_extents, 4);
+                memcpy(&block_buf[4092], &first_extents, 4);
             }
             else{
                 // link from previous extent
                 unsigned char last_buff[4096];
                 readblock(fd, last_buff, last_ext);
-                memcpy(last_buff + 4092, &new_block, 4);
+                memcpy(&last_buff[4092], &new_block, 4);
                 writeblock(fd, last_buff, last_ext);
             }
 
@@ -455,13 +376,13 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             while (ext != 0){
                 readblock(fd, extent_buff, ext);
                 uint32_t next;
-                memcpy(&next, extent_buff + 4092, 4);
+                memcpy(&next, &extent_buff[4092], 4);
                 free_block(args, ext);
                 ext = next;
             }
 
             uint32_t zero = 0;
-            memcpy(ino + 4092, &zero, 4);
+            memcpy(&block_buf[4092], &zero, 4);
 
             first_extents = 0;
             curr_extents = 0;
@@ -477,7 +398,7 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             for (i = 0; i < extents_needed; i++){
                 last_keep = curr;
                 readblock(fd, extent_buff, curr);
-                memcpy(&next, extent_buff + 4092, 4);
+                memcpy(&next, &extent_buff[4092], 4);
                 curr = next;
             }
             // free 'next' first
@@ -486,7 +407,7 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             readblock(fd, extent_buff, last_keep);
 
             uint32_t zero = 0;
-            memcpy(extent_buff + 4092, &zero, 4);
+            memcpy(&extent_buff[4092], &zero, 4);
             writeblock(fd, extent_buff, last_keep);
 
             // free the remaining extents
@@ -495,7 +416,7 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
             while(fr != 0){
                 readblock(fd, free_buff, fr);
                 uint32_t nxt;
-                memcpy(&nxt, free_buff + 4092, 4);
+                memcpy(&nxt, &free_buff[4092], 4);
                 free_block(args, fr);
                 fr = nxt;
             }
@@ -504,106 +425,19 @@ int my_truncate(void *args, uint32_t block_num, off_t new_size) {
     }
 
     // update the parent's actual size to the new_size
-    memcpy(ino + 48, &new_sz, 8);
+    memcpy(&block_buf[48], &new_sz, 8);
 
     // update the parent's number of allocated blocks to the new amount of blocks
-    uint64_t num_blocks = 1 + curr_extents;
-    memcpy(ino + 56, &num_blocks, 8);
+    uint64_t num_blocks = curr_extents+1;
+    memcpy(&block_buf[56], &num_blocks, 8);
 
     // ctime set to now, NOTE: it may need to be set to mtime given
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    uint32_t sec = (uint32_t)now.tv_sec;
-    uint32_t nsec = (uint32_t)now.tv_nsec;
-    memcpy(ino + 32, &sec, 4);
-    memcpy(ino + 36, &nsec, 4);
-    memcpy(ino + 40, &sec, 4);
-    memcpy(ino + 44, &nsec, 4);
+    update_tim(block_buf, MC_s);
 
-    writeblock(fd, ino, block_num);
+    writeblock(fd, block_buf, block_num);
 
     return 0;
 }
-
-/*int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset) {
-	printf("MYWRITE\n");
-    struct Args *fs = (struct Args*)args;
-	if (wr_len <= 0) return 0;
-	else if (wr_offset < 0) return -1;
-	unsigned char block_buf[4096];
-	readblock(fs->fd, block_buf, block_num);
-	uint32_t type_code;
-	memcpy(&type_code, &block_buf[0], 4);
-	if (type_code != 2) return -EINVAL;
-	uint16_t mode;
-	memcpy(&mode, &block_buf[4], 2);
-	if ((mode & S_IFREG) == 0) return -EINVAL;
-	uint64_t curr_size;
-	memcpy(&curr_size, &block_buf[48], 8);
-
-	uint64_t true_len = (uint64_t)(wr_len+wr_offset);
-	printf("True write len: %lu, curr_size: %lu\n", true_len, curr_size);
-	if (true_len > curr_size) {
-		printf("calling mytruncate on block %d for size %d\n", (int)block_num, (int)true_len);
-		if (my_truncate(args, block_num, (off_t)true_len)) {
-			perror("write: truncate failed");
-			return -1;
-		}
-	}
-
-	size_t bytes_written = 0;
-	int bytes_remaining = wr_len;
-	uint32_t bnum = block_num;
-	uint32_t next_extents;
-	int header_size = 64;
-	int block_offset = wr_offset;
-	int block_start;
-	while (bytes_remaining) {
-		if (bnum == 0) {
-			perror("write: error writing past end of file\n");
-			return -1;
-		}
-		readblock(fs->fd, block_buf, bnum);
-		memcpy(&next_extents, &block_buf[4092], 4);
-		memcpy(&type_code, &block_buf[0], 4);
-		if (type_code == 2) header_size = 64;
-		else if (type_code == 4) header_size = 8;
-
-		//offset is in later block, skip this one
-		if (block_offset > (4092 - header_size)) {
-			bnum = next_extents;
-			block_offset -= (4092 - header_size);
-			continue;
-		}
-		block_start = header_size + block_offset;
-
-		//write as much as possible within current block
-		if (bytes_remaining < (4092 - block_start)) {
-			memcpy(&block_buf[block_start], &buff[bytes_written], bytes_remaining);
-			writeblock(fs->fd, block_buf, bnum);
-			bytes_written += bytes_remaining;
-			bytes_remaining = 0;
-			break;
-		}
-		else {
-			memcpy(&block_buf[block_start], &buff[bytes_written], (size_t)(4092-block_start));
-			writeblock(fs->fd, block_buf, bnum);
-			block_offset = 0;
-			bytes_remaining -= (4092-block_start);
-			bytes_written += (4092-block_start);
-			bnum = next_extents;
-		}
-	}
-    
-	readblock(fs->fd, block_buf, block_num);
-	if (true_len > curr_size) {
-		uint64_t size_increase = (uint64_t)(curr_size + bytes_written - (unsigned long)wr_offset);
-		memcpy(&block_buf[48], &size_increase, 8);
-	}
-	update_tim(block_buf, M_s);
-	writeblock(fs->fd, block_buf, block_num);
-	return bytes_written;
-}*/
 
 int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset){
     struct Args *fs = (struct Args*)args;
@@ -615,35 +449,35 @@ int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, of
         return 0;
     }
 
-    unsigned char ino[4096];
-    readblock(fd, ino, block_num);
+    unsigned char block_buf[4096];
+    readblock(fd, block_buf, block_num);
 
-    uint32_t block_type;
-    memcpy(&block_type, ino, 4);
-    if (block_type != 2){
+    uint32_t type_code;
+    memcpy(&type_code, block_buf, 4);
+    if (type_code != 2){
         return -EINVAL;
     }
     uint16_t mode;
-    memcpy(&mode, ino + 4, 2);
+    memcpy(&mode, &block_buf[4], 2);
     if (!S_ISREG(mode)){
-        perror("mywrite(): inode mode is not of type file");
+        perror("write: inode mode is not of type file");
     }
 
     uint64_t curr_size;
-    memcpy(&curr_size, ino + 48, 8);
+    memcpy(&curr_size, &block_buf[48], 8);
 
     uint64_t write_start = (uint64_t)wr_offset;
     uint64_t write_end = write_start + wr_len;
-    uint64_t end = write_end;
+    uint64_t full_write_size = write_end;
 
     // grow if needed
-    if (end > curr_size){
-        int rc = my_truncate(args, block_num, (off_t)end);
-        if (rc < 0){
-            return rc;
+    if (full_write_size > curr_size){
+        int res = my_truncate(args, block_num, (off_t)full_write_size);
+        if (res < 0){
+            return res;
         }
         // re-read inode to see updated size
-        readblock(fd, ino, block_num);
+        readblock(fd, block_buf, block_num);
     }
 
     const uint64_t FIRST = 4028;
@@ -656,42 +490,39 @@ int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, of
 
     unsigned char extent_buff[4096];
     unsigned char *block;
-    int first = 1; // flag to tell if we're in the inode block or an extents block
+    int first_block = 1;
 
     while (bytes_remaining > 0 && curr_block != 0){
         int data_start;
         uint64_t cap;
 
-        if (first){
-            block = ino;
+        if (first_block) {
+            block = block_buf;
             data_start = 64; // starts at byte 64 in inode
             cap = FIRST;
         
-            memcpy(&next_extents, block + 4092, 4);
-            first = 0;
+            memcpy(&next_extents, &block[4092], 4);
+            first_block = 0;
         }
-        else{
+        else {
             readblock(fd, extent_buff, curr_block);
             block = extent_buff;
 
             data_start = 8; //starts at byte 8 in file extents
             cap = EXT;
-            memcpy(&next_extents, block + 4092, 4);
+            memcpy(&next_extents, &block[4092], 4);
         }
 
         uint64_t block_file_end = file_pos + cap;
 
         // if the whole block is before where we're supposed to write, skip over it
-        if (block_file_end <= write_start){
+        if (block_file_end <= write_start) {
             file_pos = block_file_end;
             curr_block = next_extents;
             continue;
         }
 
-        // if the location we're supposed to write is passed finish
-        if (file_pos >= write_end){
-            break;
-        }
+        if (file_pos >= write_end) break;
 
         uint64_t wr_begin = (file_pos > write_start) ? file_pos : write_start;
         uint64_t wr_end = (block_file_end < write_end) ? block_file_end : write_end;
@@ -716,24 +547,17 @@ int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, of
     }
 
     uint64_t final_size;
-    memcpy(&final_size, ino + 48, 8);
+    memcpy(&final_size, &block_buf[48], 8);
 
-    if (end > final_size){
-        final_size = end;
-        memcpy(ino + 48, &final_size, 8);
+    if (full_write_size > final_size){
+        final_size = full_write_size;
+        memcpy(&block_buf[48], &final_size, 8);
     }
 
     // change mod and status times to current time
-    struct timespec now;
-    clock_gettime(CLOCK_REALTIME, &now);
-    uint32_t sec = (uint32_t)now.tv_sec;
-    uint32_t nsec = (uint32_t)now.tv_nsec;
-    memcpy(ino + 32, &sec, 4);
-    memcpy(ino + 36, &nsec, 4);
-    memcpy(ino + 40, &sec, 4);
-    memcpy(ino + 44, &nsec, 4);
+    update_tim(block_buf, MC_s);
 
-    writeblock(fd, ino, block_num);
+    writeblock(fd, block_buf, block_num);
     
     // return bytes written
     return (int)(wr_len - bytes_remaining);
