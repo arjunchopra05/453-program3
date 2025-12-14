@@ -17,99 +17,1027 @@ struct Args
 // --------------------Read-write------------------------------------
 
 /* helper functions for read-write section only */
-void *allocate_block(void *args) {
-    struct Args *fs = (struct Args*)args;
-    void *new_block;
-    int new_block_num;
-    return new_block; //or, return new block num?
+#define A_s 4
+#define M_s 2
+#define C_s 1
+#define AMC_s 7
+void update_tim(unsigned char *block_buf, uint8_t field) {
+	printf("HELPER: update time\n");
+	struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    uint32_t sec = (uint32_t)now.tv_sec;
+    uint32_t nsec = (uint32_t)now.tv_nsec;
+	if (field & A_s) {
+		memcpy(&block_buf[24], &sec, 4);
+		memcpy(&block_buf[28], &nsec, 4);
+	}
+	if (field & M_s) {
+		memcpy(&block_buf[32], &sec, 4);
+		memcpy(&block_buf[36], &nsec, 4);
+	}
+	if (field & C_s) {
+		memcpy(&block_buf[40], &sec, 4);
+		memcpy(&block_buf[44], &nsec, 4);
+	}
 }
 
-void free_block(void *args, uint32_t prev_block_num, uint32_t block_num) {
+uint32_t allocate_block(void *args) {
+	printf("HELPER: allocate block\n");
     struct Args *fs = (struct Args*)args;
-    return;
+	uint32_t new_bnum;
+	uint32_t free_head = 0;
+	uint32_t free_second;
+
+	//get free list head
+	unsigned char super[4096];
+	readblock(fs->fd, super, 0);
+	memcpy(&free_head, &super[4092], 4);
+
+	if (free_head) {
+		//get next in free list
+		unsigned char free_head_buf[4096];
+		readblock(fs->fd, free_head_buf, free_head);
+		memcpy(&free_second, &free_head_buf[4], 4);
+		//write second free block to free list head in super block
+		memcpy(&super[4092], &free_second, 4);
+		writeblock(fs->fd, super, 0);
+		new_bnum = free_head;
+	}
+	else { //allocate new block by growing size of file by 1 block's worth of bytes
+		struct stat st_buf;
+		if (fstat(fs->fd, &st_buf) < 0) {
+			perror("allocate_block(): fstat failed");
+			return 0;
+		}
+		off_t size = st_buf.st_size;
+		new_bnum = (uint32_t) size / 4096;
+		if (ftruncate(fs->fd, size + 4096) < 0) {
+            perror("allocate_block(): ftruncate failed");
+            return 0;
+        }
+		unsigned char empty_buf[4096];
+		memset(empty_buf, 0, sizeof(empty_buf));
+		writeblock(fs->fd, empty_buf, new_bnum);
+	}
+    return new_bnum;
 }
 
-int add_dir_entry(void *args, uint32_t ino_dir, uint16_t len, uint32_t ino_map, unsigned char *name) {
+void free_block(void *args, uint32_t block_num) {
+	printf("HELPER: free_block\n");
     struct Args *fs = (struct Args*)args;
+
+	unsigned char super[4096];
+	readblock(fs->fd, super, 0);
+	uint32_t free_head;
+	memcpy(&free_head, &super[4092], 4);
+
+	uint32_t bnum = block_num;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t next_extents;
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+
+	if (type_code == 1 || type_code == 5) return;
+	
+	while (bnum) {
+		type_code = 5;
+		memcpy(&next_extents, &block_buf[4092], 4);
+		memcpy(&block_buf[0], &type_code, 4);
+		memcpy(&block_buf[4092], &free_head, 4);
+		writeblock(fs->fd, block_buf, bnum);
+		free_head = bnum;
+		bnum = next_extents;
+	}
+	memcpy(&super[4092], &free_head, 4);
+	writeblock(fs->fd, super, 0);
+}
+
+int add_dir_entry(void *args, uint32_t parent_dir, uint16_t len, uint32_t ino_map, const char *name) {
+	printf("HELPER: add directory entry\n");
+    struct Args *fs = (struct Args*)args;
+	uint32_t dir_num = parent_dir;
+	unsigned char dir_buf[4096];
+
+	unsigned char ino_buf[4096];
+	readblock(fs->fd, ino_buf, parent_dir);
+	
+	uint32_t type_code;
+	memcpy(&type_code, &ino_buf[0], 4);
+	uint16_t mode;
+	memcpy(&mode, &ino_buf[4], 2);
+	if (type_code != 2) return -EINVAL;
+	else if ((mode & S_IFDIR) == 0) return -EINVAL;
+	
+	uint32_t next_extents;
+	int entry_base;
+	uint16_t entry_len;
+	while (dir_num) {
+		readblock(fs->fd, dir_buf, dir_num);
+
+		memcpy(&type_code, &dir_buf[0], 4);
+		if (type_code == 2) entry_base = 64;
+		else if (type_code == 3) entry_base = 4;
+		else return -EINVAL;
+
+		memcpy(&next_extents, &dir_buf[4092], 4);
+		if (next_extents) {
+			dir_num = next_extents;
+			continue;
+		}
+
+		entry_len = 0;
+		do {
+			entry_base += entry_len;
+			memcpy(&entry_len, &dir_buf[entry_base], 2);
+			if (entry_base + entry_len >= 4092) break;
+		} while (entry_len > 0);
+
+		if (entry_base + entry_len >= 4092) { //allocate new extents block and make this first entry
+			uint32_t new_block_num = allocate_block(args);
+			unsigned char new_block_buf[4096];
+			readblock(fs->fd, new_block_buf, new_block_num);
+			//initialize new final extents block
+			memcpy(&new_block_buf[4092], &next_extents, 4);
+			type_code = 3;
+			memcpy(&new_block_buf[0], &type_code, 4);
+			entry_len = 0;
+			memcpy(&new_block_buf[4], &entry_len, 2);
+			writeblock(fs->fd, new_block_buf, new_block_num);
+			//append to dir extents list
+			memcpy(&dir_buf[4092], &new_block_num, 4);
+			writeblock(fs->fd, dir_buf, dir_num);
+			dir_num = new_block_num;
+			continue;
+		}
+		else { //entry_len == 0, found end of entries list
+			int new_entry_len = len + 6;
+			memcpy(&dir_buf[entry_base], &new_entry_len, 2);
+			memcpy(&dir_buf[entry_base+2], &ino_map, 4);
+			memcpy(&dir_buf[entry_base+6], name, (size_t)len);
+			//metadata update
+			uint16_t zero = 0;
+			memcpy(&dir_buf[entry_base+new_entry_len], &zero, 2);
+			uint64_t actual_size;
+			memcpy(&actual_size, &ino_buf[48], 8);
+			actual_size += new_entry_len;
+			memcpy(&ino_buf[48], &actual_size, 8);
+			update_tim(ino_buf, AMC_s);
+			writeblock(fs->fd, ino_buf, parent_dir);
+			writeblock(fs->fd, dir_buf, dir_num);
+			break;
+		}
+	}
     return 0;
 }
 
-int remove_dir_entry(void *args, uint32_t ino_dir, uint32_t inode_map) {
+uint32_t remove_dir_entry(void *args, uint32_t parent_dir, const char *name) {
+	printf("HELPER: remove directory entry\n");
     struct Args *fs = (struct Args*)args;
-    return 0;
-}
+	uint32_t dir_num = parent_dir;
+	unsigned char dir_buf[4096];
+	uint32_t type_code;
+	uint32_t block_num = 0;
 
-int truncate(void *args, uint32_t ino_file, uint64_t target_size) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
+	unsigned char ino_buf[4096];
+	readblock(fs->fd, ino_buf, parent_dir);
+	memcpy(&type_code, &ino_buf[0], 4);
+	if (type_code != 2) return 0;
 
-ssize_t write(void *args, uint32_t ino_file, const char *buff, size_t wr_len, off_t wr_offset) {
-    struct Args *fs = (struct Args*)args;
-    ssize_t bytes_written;
-    return bytes_written;
+	uint32_t next_extents;
+	int entry_base;
+	uint16_t entry_len;
+	uint32_t entry_inode;
+	char *entry_name_buf = (char *) calloc(4086, sizeof(char));
+	unsigned char *entry;
+	while (dir_num) {
+		readblock(fs->fd, dir_buf, dir_num);
+		memcpy(&type_code, &dir_buf[0], 4);
+		if (type_code == 2) {
+			entry_base = 64;
+		}
+		else if (type_code == 3) {
+			entry_base = 4;
+		}
+		else return 0;
+
+		memcpy(&next_extents, &dir_buf[4092], 4);
+		entry = &dir_buf[entry_base];
+		
+		memcpy(&entry_len, &entry[0], 2);
+		while (entry_len > 0) {
+			memcpy(&entry_inode, &entry[2], 4);
+			memcpy(entry_name_buf, &entry[6], (size_t) entry_len);
+			entry_name_buf[entry_len-6] = 0;
+			if (strcmp(entry_name_buf, name) == 0) {
+				block_num = entry_inode;
+			}
+			
+			if (block_num) { //entry found, move remaining entries up
+				int size_to_move = 4092-(entry_base+entry_len);
+				memmove(&dir_buf[entry_base],&dir_buf[entry_base+entry_len],(size_t)size_to_move);
+				//metadata to show that there are no more entries in the new space at the end
+				uint16_t zero = 0;
+				int new_end = entry_base + size_to_move;
+				memcpy(&dir_buf[new_end], &zero, 2);
+				uint64_t actual_size;
+				memcpy(&actual_size, &ino_buf[48], 8);
+				actual_size -= entry_len;
+				memcpy(&ino_buf[48], &actual_size, 8);
+				update_tim(ino_buf, AMC_s);
+				writeblock(fs->fd, ino_buf, parent_dir);
+			}
+
+			entry_base += entry_len;
+			entry = &dir_buf[entry_base];
+			memcpy(&entry_len, &entry[0], 2);
+			if (entry_base + entry_len >= 4092) break;
+		}
+		if (block_num) break;
+		dir_num = next_extents;
+	}
+	free(entry_name_buf);
+	writeblock(fs->fd, dir_buf, dir_num);
+    return block_num;
 }
 
 /* actual read-write implementation */
-int my_chmod(void *args, uint32_t block_num, mode_t new_mode) {
+/*int my_truncate(void *args, uint32_t block_num, off_t new_size) {
+	printf("MYTRUNCATE, block_num=%u, new_size=%ld\n", block_num, new_size);
     struct Args *fs = (struct Args*)args;
+	if (!block_num) return -1;
+	else if (new_size <= 0) return 0;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t type_code;
+	uint16_t mode;
+	memcpy(&mode, &block_buf[4], 2);
+	uint64_t curr_size;
+	uint64_t curr_blocks;
+	memcpy(&curr_size, &block_buf[48], 8);
+	memcpy(&curr_blocks, &block_buf[56], 8);
+	uint64_t new_blocks = 1;
+	uint64_t new_sz = (uint64_t) new_size;
+	int extra = 68;
+	while ((new_blocks * 4096) < (new_sz + extra)) {
+		new_blocks++;
+		if (mode | S_IFDIR) extra += 8;
+		else extra += 12;
+	}
+
+	if (curr_blocks <= new_blocks) {
+		printf("shrinking from %d blocks to %d blocks\n", (int)curr_blocks, (int)new_blocks);
+		uint32_t bnum = block_num;
+		uint32_t next_extents;
+		uint64_t block_count = 1;
+		while (block_count <= new_blocks) {
+			readblock(fs->fd, block_buf, bnum);
+			memcpy(&next_extents, &block_buf[4092], 4);
+			bnum = next_extents;
+			block_count++;
+		}
+		if (bnum) free_block(args, bnum);
+	}
+	else {
+		printf("growing from %d blocks to %d blocks\n", (int)curr_blocks, (int)new_blocks);
+		uint32_t bnum = block_num;
+		uint32_t next_extents;
+		uint32_t new_bnum;
+		unsigned char new_block_buf[4096];
+		uint64_t block_count = 1;
+		while (block_count <= new_blocks) {
+			readblock(fs->fd, block_buf, bnum);
+			if (block_count <= curr_blocks) {
+				memcpy(&next_extents, &block_buf[4092], 4);
+				if (next_extents) bnum = next_extents;
+			}
+			else if (block_count > curr_blocks) {
+				new_bnum = allocate_block(args);
+				memcpy(&block_buf[4092], &new_bnum, 4);
+				readblock(fs->fd, new_block_buf, new_bnum);
+				if (mode | S_IFDIR) {
+					type_code = 3;
+					memcpy(&new_block_buf[0], &type_code, 4);
+				}
+				else {
+					type_code = 4;
+					memcpy(&new_block_buf[0], &type_code, 4);
+					memcpy(&new_block_buf[4], &block_num, 4);
+				}
+				next_extents = 0;
+				memcpy(&new_block_buf[4092], &next_extents, 4);
+				writeblock(fs->fd, new_block_buf, new_bnum);
+				writeblock(fs->fd, block_buf, bnum);
+				bnum = new_bnum;
+			}
+			block_count++;
+		}
+	}
+
+	readblock(fs->fd, block_buf, block_num);
+	memcpy(&block_buf[48], &new_sz, 8);
+	memcpy(&block_buf[56], &new_blocks, 8);
+	update_tim(block_buf, AMC_s);
+	writeblock(fs->fd, block_buf, block_num);
+
+    return 0;
+}*/
+
+int my_truncate(void *args, uint32_t block_num, off_t new_size) {
+    struct Args *fs = (struct Args*)args;
+    int fd = fs->fd;
+
+    printf("TRUNCATE inode=%u new_size=%ld\n", block_num, (long)new_size);
+
+    unsigned char ino[4096];
+    readblock(fd, ino, block_num);
+
+    uint32_t block_type;
+    memcpy(&block_type, ino, 4);
+    if (block_type != 2){
+        return -EINVAL;
+    }
+    uint16_t mode;
+    memcpy(&mode, ino + 4, 2);
+    if (!S_ISREG(mode)){
+        perror("mytruncate(): inode is not of type file");
+        return -EINVAL; // QUESTION: Can truncate be done on directories?
+    }
+
+    uint64_t curr_size;
+    memcpy(&curr_size, ino + 48, 8);
+
+    uint64_t curr_blocks;
+    memcpy(&curr_blocks, ino + 56, 8);
+
+    uint32_t first_extents;
+    memcpy(&first_extents, ino + 4092, 4);
+
+    const uint64_t FIRST = 4028;
+    const uint64_t EXT = 4084;
+
+    if (new_size < 0){
+        new_size = 0;
+    }
+
+    uint64_t new_sz = (uint64_t)new_size;
+
+    uint64_t extents_needed;
+    if (new_sz == 0 || new_sz <= FIRST){
+        extents_needed = 0; // accounts for the inode
+    }
+    else{ // else need multiple blocks
+        uint64_t extra = new_sz - FIRST;
+        extents_needed = (extra + EXT - 1) / EXT;
+    }
+
+    uint64_t curr_extents = (curr_blocks > 0) ? curr_blocks - 1 : 0;
+
+    // ALLOCATE extra extents (if needed)
+    if (extents_needed > curr_extents){
+        uint64_t to_add = extents_needed - curr_extents;
+
+        uint32_t last_ext = 0;
+        if (first_extents != 0){
+            last_ext = first_extents;
+            unsigned char extent_buff[4096];
+            while (last_ext != 0){
+                readblock(fd, extent_buff, last_ext);
+                uint32_t next;
+                memcpy(&next, extent_buff + 4092, 4);
+                if (next == 0){
+                    break;
+                }
+                last_ext = next;
+            }
+        }
+
+        uint64_t i = 0;
+        for (i = 0; i < to_add; i++){
+            uint32_t new_block = allocate_block(args);
+            if (new_block == 0){
+                return -ENOSPC;
+            }
+
+            unsigned char new_buff[4096];
+            memset(new_buff, 0, sizeof(new_buff));
+
+            uint32_t type4 = 4;
+            memcpy(new_buff, &type4, 4);
+
+            uint32_t next = 0;
+            memcpy(new_buff + 4092, &next, 4);
+            writeblock(fd, new_buff, new_block);
+
+            if (curr_extents == 0 && i == 0){
+                // no extents yet
+                first_extents = new_block;
+                memcpy(ino + 4092, &first_extents, 4);
+            }
+            else{
+                // link from previous extent
+                unsigned char last_buff[4096];
+                readblock(fd, last_buff, last_ext);
+                memcpy(last_buff + 4092, &new_block, 4);
+                writeblock(fd, last_buff, last_ext);
+            }
+
+            last_ext = new_block;
+            curr_extents++;
+        }
+    }
+    // FREE extra extents from the end
+    else if (extents_needed < curr_extents){
+        if (extents_needed == 0){
+            // free extents
+            uint32_t ext = first_extents;
+            unsigned char extent_buff[4096];
+            while (ext != 0){
+                readblock(fd, extent_buff, ext);
+                uint32_t next;
+                memcpy(&next, extent_buff + 4092, 4);
+                free_block(args, ext);
+                ext = next;
+            }
+
+            uint32_t zero = 0;
+            memcpy(ino + 4092, &zero, 4);
+
+            first_extents = 0;
+            curr_extents = 0;
+        }
+        else{
+            // keep the needed extents and free the remaining ones
+            uint32_t curr = first_extents;
+            uint32_t last_keep = 0;
+            uint32_t next = 0;
+            unsigned char extent_buff[4096];
+
+            uint64_t i = 0;
+            for (i = 0; i < extents_needed; i++){
+                last_keep = curr;
+                readblock(fd, extent_buff, curr);
+                memcpy(&next, extent_buff + 4092, 4);
+                curr = next;
+            }
+            // free 'next' first
+            uint32_t to_free = curr;
+
+            readblock(fd, extent_buff, last_keep);
+
+            uint32_t zero = 0;
+            memcpy(extent_buff + 4092, &zero, 4);
+            writeblock(fd, extent_buff, last_keep);
+
+            // free the remaining extents
+            unsigned char free_buff[4096];
+            uint32_t fr = to_free;
+            while(fr != 0){
+                readblock(fd, free_buff, fr);
+                uint32_t nxt;
+                memcpy(&nxt, free_buff + 4092, 4);
+                free_block(args, fr);
+                fr = nxt;
+            }
+            curr_extents = extents_needed;
+        }
+    }
+
+    // update the parent's actual size to the new_size
+    memcpy(ino + 48, &new_sz, 8);
+
+    // update the parent's number of allocated blocks to the new amount of blocks
+    uint64_t num_blocks = 1 + curr_extents;
+    memcpy(ino + 56, &num_blocks, 8);
+
+    // ctime set to now, NOTE: it may need to be set to mtime given
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    uint32_t sec = (uint32_t)now.tv_sec;
+    uint32_t nsec = (uint32_t)now.tv_nsec;
+    memcpy(ino + 32, &sec, 4);
+    memcpy(ino + 36, &nsec, 4);
+    memcpy(ino + 40, &sec, 4);
+    memcpy(ino + 44, &nsec, 4);
+
+    writeblock(fd, ino, block_num);
+
+    return 0;
+}
+
+/*int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset) {
+	printf("MYWRITE\n");
+    struct Args *fs = (struct Args*)args;
+	if (wr_len <= 0) return 0;
+	else if (wr_offset < 0) return -1;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code != 2) return -EINVAL;
+	uint16_t mode;
+	memcpy(&mode, &block_buf[4], 2);
+	if ((mode & S_IFREG) == 0) return -EINVAL;
+	uint64_t curr_size;
+	memcpy(&curr_size, &block_buf[48], 8);
+
+	uint64_t true_len = (uint64_t)(wr_len+wr_offset);
+	printf("True write len: %lu, curr_size: %lu\n", true_len, curr_size);
+	if (true_len > curr_size) {
+		printf("calling mytruncate on block %d for size %d\n", (int)block_num, (int)true_len);
+		if (my_truncate(args, block_num, (off_t)true_len)) {
+			perror("write: truncate failed");
+			return -1;
+		}
+	}
+
+	size_t bytes_written = 0;
+	int bytes_remaining = wr_len;
+	uint32_t bnum = block_num;
+	uint32_t next_extents;
+	int header_size = 64;
+	int block_offset = wr_offset;
+	int block_start;
+	while (bytes_remaining) {
+		if (bnum == 0) {
+			perror("write: error writing past end of file\n");
+			return -1;
+		}
+		readblock(fs->fd, block_buf, bnum);
+		memcpy(&next_extents, &block_buf[4092], 4);
+		memcpy(&type_code, &block_buf[0], 4);
+		if (type_code == 2) header_size = 64;
+		else if (type_code == 4) header_size = 8;
+
+		//offset is in later block, skip this one
+		if (block_offset > (4092 - header_size)) {
+			bnum = next_extents;
+			block_offset -= (4092 - header_size);
+			continue;
+		}
+		block_start = header_size + block_offset;
+
+		//write as much as possible within current block
+		if (bytes_remaining < (4092 - block_start)) {
+			memcpy(&block_buf[block_start], &buff[bytes_written], bytes_remaining);
+			writeblock(fs->fd, block_buf, bnum);
+			bytes_written += bytes_remaining;
+			bytes_remaining = 0;
+			break;
+		}
+		else {
+			memcpy(&block_buf[block_start], &buff[bytes_written], (size_t)(4092-block_start));
+			writeblock(fs->fd, block_buf, bnum);
+			block_offset = 0;
+			bytes_remaining -= (4092-block_start);
+			bytes_written += (4092-block_start);
+			bnum = next_extents;
+		}
+	}
+    
+	readblock(fs->fd, block_buf, block_num);
+	if (true_len > curr_size) {
+		uint64_t size_increase = (uint64_t)(curr_size + bytes_written - (unsigned long)wr_offset);
+		memcpy(&block_buf[48], &size_increase, 8);
+	}
+	update_tim(block_buf, M_s);
+	writeblock(fs->fd, block_buf, block_num);
+	return bytes_written;
+}*/
+
+int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset){
+    struct Args *fs = (struct Args*)args;
+    int fd = fs->fd;
+
+    printf("WRITE %d\n", block_num);
+
+    if (wr_len == 0){
+        return 0;
+    }
+
+    unsigned char ino[4096];
+    readblock(fd, ino, block_num);
+
+    uint32_t block_type;
+    memcpy(&block_type, ino, 4);
+    if (block_type != 2){
+        return -EINVAL;
+    }
+    uint16_t mode;
+    memcpy(&mode, ino + 4, 2);
+    if (!S_ISREG(mode)){
+        perror("mywrite(): inode mode is not of type file");
+    }
+
+    uint64_t curr_size;
+    memcpy(&curr_size, ino + 48, 8);
+
+    uint64_t write_start = (uint64_t)wr_offset;
+    uint64_t write_end = write_start + wr_len;
+    uint64_t end = write_end;
+
+    // grow if needed
+    if (end > curr_size){
+        int rc = my_truncate(args, block_num, (off_t)end);
+        if (rc < 0){
+            return rc;
+        }
+        // re-read inode to see updated size
+        readblock(fd, ino, block_num);
+    }
+
+    const uint64_t FIRST = 4028;
+    const uint64_t EXT = 4084;
+
+    size_t bytes_remaining = wr_len;
+    uint64_t file_pos = 0; // offset at each curreent block
+    uint32_t curr_block = block_num;
+    uint32_t next_extents = 0;
+
+    unsigned char extent_buff[4096];
+    unsigned char *block;
+    int first = 1; // flag to tell if we're in the inode block or an extents block
+
+    while (bytes_remaining > 0 && curr_block != 0){
+        int data_start;
+        uint64_t cap;
+
+        if (first){
+            block = ino;
+            data_start = 64; // starts at byte 64 in inode
+            cap = FIRST;
+        
+            memcpy(&next_extents, block + 4092, 4);
+            first = 0;
+        }
+        else{
+            readblock(fd, extent_buff, curr_block);
+            block = extent_buff;
+
+            data_start = 8; //starts at byte 8 in file extents
+            cap = EXT;
+            memcpy(&next_extents, block + 4092, 4);
+        }
+
+        uint64_t block_file_end = file_pos + cap;
+
+        // if the whole block is before where we're supposed to write, skip over it
+        if (block_file_end <= write_start){
+            file_pos = block_file_end;
+            curr_block = next_extents;
+            continue;
+        }
+
+        // if the location we're supposed to write is passed finish
+        if (file_pos >= write_end){
+            break;
+        }
+
+        uint64_t wr_begin = (file_pos > write_start) ? file_pos : write_start;
+        uint64_t wr_end = (block_file_end < write_end) ? block_file_end : write_end;
+        if (wr_end > wr_begin){
+            size_t write_len = (size_t)(wr_end - wr_begin);
+            if (write_len > bytes_remaining){
+                write_len = bytes_remaining;
+            }
+
+            size_t start_in_block = (size_t)(wr_begin - file_pos);
+            size_t buff_offset = (size_t)(wr_begin - write_start);
+
+            memcpy(block + data_start + start_in_block, buff + buff_offset, write_len);
+
+            writeblock(fd, block, curr_block);
+
+            bytes_remaining -= write_len;
+        }
+
+        file_pos = block_file_end;
+        curr_block = next_extents;
+    }
+
+    uint64_t final_size;
+    memcpy(&final_size, ino + 48, 8);
+
+    if (end > final_size){
+        final_size = end;
+        memcpy(ino + 48, &final_size, 8);
+    }
+
+    // change mod and status times to current time
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    uint32_t sec = (uint32_t)now.tv_sec;
+    uint32_t nsec = (uint32_t)now.tv_nsec;
+    memcpy(ino + 32, &sec, 4);
+    memcpy(ino + 36, &nsec, 4);
+    memcpy(ino + 40, &sec, 4);
+    memcpy(ino + 44, &nsec, 4);
+
+    writeblock(fd, ino, block_num);
+    
+    // return bytes written
+    return (int)(wr_len - bytes_remaining);
+}
+
+int my_chmod(void *args, uint32_t block_num, mode_t new_mode) {
+	printf("MYCHMOD\n");
+    struct Args *fs = (struct Args*)args;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code != 2) { //only inodes
+		return -EINVAL;
+	}
+	memcpy(&block_buf[4], &new_mode, 4);
+	writeblock(fs->fd, block_buf, block_num);
     return 0;
 }
 
 int my_chown(void *args, uint32_t block_num, uid_t new_uid, gid_t new_gid) {
+	printf("MYCHOWN\n");
     struct Args *fs = (struct Args*)args;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code != 2) { //only inodes
+		return -EINVAL;
+	}
+	memcpy(&block_buf[8], &new_uid, 4);
+	memcpy(&block_buf[12], &new_gid, 4);
+	writeblock(fs->fd, block_buf, block_num);
     return 0;
 }
 
 int my_utimens(void *args, uint32_t block_num, const struct timespec tv[2]) {
+	printf("MYUTIMENS\n");
     struct Args *fs = (struct Args*)args;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, block_num);
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code != 2) { //only inodes
+		return -EINVAL;
+	}
+	struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+
+	uint32_t atim_s = (tv) ? tv[0].tv_sec : now.tv_sec;
+	uint32_t atim_ns = (tv) ? tv[0].tv_nsec : now.tv_nsec;
+	uint32_t mtim_s = (tv) ? tv[1].tv_sec : now.tv_sec;
+	uint32_t mtim_ns = (tv) ? tv[1].tv_nsec : now.tv_nsec;
+	memcpy(&block_buf[24], &atim_s, 4);
+	memcpy(&block_buf[28], &atim_ns, 4);
+	memcpy(&block_buf[32], &mtim_s, 4);
+	memcpy(&block_buf[36], &mtim_ns, 4);
+	update_tim(block_buf, C_s);
+
+	writeblock(fs->fd, block_buf, block_num);
     return 0;
 }
 
 int my_rmdir(void *args, uint32_t block_num, const char *name) {
+	printf("MYRMDIR\n");
     struct Args *fs = (struct Args*)args;
+	if (!name || !block_num) return -1;
+	unsigned char parent_buf[4096];
+	readblock(fs->fd, parent_buf, block_num);
+	uint32_t type_code;
+	uint16_t mode;
+	memcpy(&type_code, &parent_buf[0], 4);
+	memcpy(&mode, &parent_buf[4], 2);
+	if (type_code != 2) return -EINVAL;
+	else if ((mode & S_IFDIR) == 0) return -EINVAL;
+
+	uint32_t rm_num = remove_dir_entry(args, block_num, name);
+	if (!rm_num) {
+		perror("rmdir: remove_dir_entry() failed");
+		return -1;
+	}
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, rm_num);
+	memcpy(&type_code, &block_buf[0], 4);
+	memcpy(&mode, &block_buf[4], 2);
+	uint64_t actual_size;
+	memcpy(&actual_size, &block_buf[48], 8);
+	if (type_code != 2) return -EINVAL;
+	else if ((mode & S_IFDIR) == 0) return -EINVAL;
+	else if (actual_size > 0) return -1;
+
+	free_block(args, rm_num);
     return 0;
 }
 
 int my_unlink(void *args, uint32_t block_num, const char *name) {
+	printf("MYUNLINK\n");
     struct Args *fs = (struct Args*)args;
+	if (!name || !block_num) return -1;
+	unsigned char parent_buf[4096];
+	readblock(fs->fd, parent_buf, block_num);
+	uint32_t type_code;
+	memcpy(&type_code, &parent_buf[0], 4);
+	if (type_code != 2) return -EINVAL;
+
+	uint32_t rm_num = remove_dir_entry(args, block_num, name);
+	if (!rm_num) {
+		perror("unlink: remove_dir_entry() failed");
+		return -1;
+	}
+
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, rm_num);
+	uint16_t nlink;
+	memcpy(&nlink, &block_buf[6], 2);
+	nlink--;
+	memcpy(&block_buf[6], &nlink, 2);
+	update_tim(block_buf, C_s);
+
+	writeblock(fs->fd, block_buf, rm_num);
+
+	if (nlink == 0) {
+		free_block(args, rm_num);
+	}
     return 0;
 }
 
 int my_mknod(void *args, uint32_t parent_block, const char *name, mode_t new_mode, dev_t new_dev) {
+	printf("MYMKNOD\n");
     struct Args *fs = (struct Args*)args;
+	//standard sanity check
+	if (!name || !new_mode || !new_dev || !parent_block) return -1;
+	unsigned char parent_buf[4096];
+	readblock(fs->fd, parent_buf, parent_block);
+	uint32_t type_code;
+	memcpy(&type_code, &parent_buf[0], 4);
+	if (type_code != 2) return -EINVAL;
+
+	//actual code
+	uint32_t bnum = allocate_block(args);
+	unsigned char block_buf[4096];
+	type_code = 2;
+	fuse_context *context = fuse_get_context();
+	uint32_t uid = context->uid;
+	uint32_t gid = context->gid;
+	uint32_t user_flags = 0;
+	uint32_t next_extents = 0;
+	uint16_t mode = new_mode;
+	uint16_t nlink = 1;
+    if ((mode & S_IFMT) == 0){
+        mode |= S_IFREG;
+    }
+	memcpy(&block_buf[0], &type_code, 4);
+	memcpy(&block_buf[4], &mode, 2);
+	memcpy(&block_buf[6], &nlink, 2);
+	memcpy(&block_buf[8], &uid, 4);
+	memcpy(&block_buf[12], &gid, 4);
+	memcpy(&block_buf[16], &new_dev, 4);
+	memcpy(&block_buf[20], &user_flags, 4);
+	memcpy(&block_buf[4092], &next_extents, 4);
+	uint64_t size = 0;
+	uint64_t blocks = 1;
+	memcpy(&block_buf[48], &size, 8);
+	memcpy(&block_buf[56], &blocks, 8);
+	update_tim(block_buf, AMC_s);
+	
+	writeblock(fs->fd, block_buf, bnum);
+	if (add_dir_entry(args, parent_block, strlen(name), bnum, name)) {
+		perror("mknod: add_dir_entry() failed");
+		return -1;
+	}
     return 0;
 }
 
 int my_symlink(void *args, uint32_t parent_block, const char *name, const char *link_dest) {
+	printf("MYSYMLINK\n");
     struct Args *fs = (struct Args*)args;
+	//standard sanity check
+	if (!name || !link_dest || !parent_block) return -1;
+	unsigned char parent_buf[4096];
+	readblock(fs->fd, parent_buf, parent_block);
+	uint32_t type_code;
+	memcpy(&type_code, &parent_buf[0], 4);
+	if (type_code != 2) return -EINVAL;
+
+	//actual code
+	uint32_t bnum = allocate_block(args);
+	unsigned char block_buf[4096];
+	type_code = 2;
+	fuse_context *context = fuse_get_context();
+	uint32_t uid = context->uid;
+	uint32_t gid = context->gid;
+	uint32_t user_flags = 0;
+	uint32_t rdev = 0;
+	uint32_t next_extents = 0;
+	uint16_t mode = S_IFLNK | 0744;
+	uint16_t nlink = 1;
+	memcpy(&block_buf[0], &type_code, 4);
+	memcpy(&block_buf[4], &mode, 2);
+	memcpy(&block_buf[6], &nlink, 2);
+	memcpy(&block_buf[8], &uid, 4);
+	memcpy(&block_buf[12], &gid, 4);
+	memcpy(&block_buf[16], &rdev, 4);
+	memcpy(&block_buf[20], &user_flags, 4);
+	memcpy(&block_buf[4092], &next_extents, 4);
+	uint64_t size = strlen(link_dest) + 1;
+	uint64_t blocks = 1;
+	memcpy(&block_buf[48], &size, 8);
+	memcpy(&block_buf[56], &blocks, 8);
+	update_tim(block_buf, AMC_s);
+	
+	writeblock(fs->fd, block_buf, bnum);
+	if (add_dir_entry(args, parent_block, strlen(name), bnum, name)) {
+		perror("symlink: add_dir_entry() failed");
+		return -1;
+	}
+
+	my_write(args, bnum, link_dest, (size_t)(strlen(link_dest)), 0);
     return 0;
 }
 
 int my_mkdir(void *args, uint32_t parent_block, const char *name, mode_t new_mode) {
+	printf("MYMKDIR\n");
     struct Args *fs = (struct Args*)args;
+	if (!name || !new_mode || !parent_block) return -1;
+	unsigned char parent_buf[4096];
+	readblock(fs->fd, parent_buf, parent_block);
+	uint32_t type_code;
+	memcpy(&type_code, &parent_buf[0], 4);
+	if (type_code != 2) return -EINVAL;
+
+	//actual code
+	uint32_t bnum = allocate_block(args);
+	unsigned char block_buf[4096];
+	type_code = 2;
+	fuse_context *context = fuse_get_context();
+	uint32_t uid = context->uid;
+	uint32_t gid = context->gid;
+	uint32_t user_flags = 0;
+	uint32_t rdev = 0;
+	uint32_t next_extents = 0;
+	uint16_t mode = new_mode | S_IFDIR;
+	uint16_t nlink = 1;
+	memcpy(&block_buf[0], &type_code, 4);
+	memcpy(&block_buf[4], &mode, 2);
+	memcpy(&block_buf[6], &nlink, 2);
+	memcpy(&block_buf[8], &uid, 4);
+	memcpy(&block_buf[12], &gid, 4);
+	memcpy(&block_buf[16], &rdev, 4);
+	memcpy(&block_buf[20], &user_flags, 4);
+	memcpy(&block_buf[4092], &next_extents, 4);
+	uint64_t size = 0;
+	uint64_t blocks = 1;
+	memcpy(&block_buf[48], &size, 8);
+	memcpy(&block_buf[56], &blocks, 8);
+	update_tim(block_buf, AMC_s);
+	
+	writeblock(fs->fd, block_buf, bnum);
+	if (add_dir_entry(args, parent_block, strlen(name), bnum, name)) {
+		perror("mkdir: add_dir_entry() failed");
+		return -1;
+	}
     return 0;
 }
 
 int my_link(void *args, uint32_t parent_block, const char *name, uint32_t dest_block) {
+	printf("MYLINK\n");
     struct Args *fs = (struct Args*)args;
+	//sanity checks
+	if (!parent_block || !name || !dest_block) return -1;
+	unsigned char block_buf[4096];
+	readblock(fs->fd, block_buf, dest_block);
+	uint32_t type_code;
+	memcpy(&type_code, &block_buf[0], 4);
+	if (type_code != 2) return -1;
+	//create hard link
+	uint16_t nlink;
+	memcpy(&nlink, &block_buf[6], 2);
+	if (add_dir_entry(args, parent_block, strlen(name), dest_block, name)) {
+		perror("link: add_dir_entry() failed");
+		return -1;
+	}
+	nlink++;
+	memcpy(&block_buf[6], &nlink, 2);
+	update_tim(block_buf, C_s);
+	writeblock(fs->fd, block_buf, dest_block);
     return 0;
 }
 
 int my_rename(void *args, uint32_t old_parent, const char *old_name, uint32_t new_parent, const char *new_name) {
-    struct Args *fs = (struct Args*)args;
-    return 0;
-}
+	printf("MYRENAME\n");
+    //struct Args *fs = (struct Args*)args;
+	if (!old_parent || !old_name || !new_parent || !new_name) return -1;
 
-int my_truncate(void *args, uint32_t block_num, off_t new_size) {
-    struct Args *fs = (struct Args*)args;
+	uint32_t bnum = remove_dir_entry(args, old_parent, old_name);
+	if (!bnum) {
+		perror("rename: remove_dir_entry() failed");
+		return -1;
+	}
+	if (add_dir_entry(args, new_parent, strlen(new_name), bnum, new_name)) {
+		perror("rename: add_dir_entry() failed");
+		return -1;
+	}
     return 0;
-}
-
-int my_write(void *args, uint32_t block_num, const char *buff, size_t wr_len, off_t wr_offset) {
-    struct Args *fs = (struct Args*)args;
-    int bytes_written;
-    return bytes_written;
 }
 
 
@@ -125,7 +1053,7 @@ static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 {
 	if (!stbuf) return -1;
 	struct Args *fs = (struct Args*)args;
-	printf("GETATTR %d\n", block_num);
+	printf("MYGETATTR %d\n", block_num);
 
 	unsigned char block_buf[4096];
 	readblock(fs->fd, block_buf, block_num);
@@ -141,7 +1069,7 @@ static int mygetattr(void *args, uint32_t block_num, struct stat *stbuf)
 		inode_num = block_num;
 	}
 	else {
-		return -1;
+		return -EINVAL;
 	}
 
 	uint16_t mode, nlink;
@@ -191,6 +1119,7 @@ static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_c
 {
 	if (!buf) return -1;
 	struct Args *fs = (struct Args*)args;
+	printf("MYREADDIR %d\n", block_num);
 
 	//assume given block_num will always be an inode
 	int first_block = 1;
@@ -198,37 +1127,39 @@ static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_c
 	uint32_t bnum = block_num; //current bnum
 	uint32_t type_code;
 
+	uint32_t next_extents;
+	uint16_t dir_entry_len;
+	uint32_t dir_entry_inode;
+	char *dir_entry_name_buf = (char *) calloc(4086, sizeof(char)); //hard-coded max length of name
+	unsigned char *dir_entry;
+	int entry_header_start;
 	while (bnum) {
 		readblock(fs->fd, block_buf, bnum);
 		//printf("read block num %d\n", bnum);
 		memcpy(&type_code, &block_buf[0], 4);
-		int entry_header_start;
+		
 		if (type_code == 2) {
 			if (first_block) first_block = 0;
-			else return -1; //this should never happen
+			else return -EINVAL; //this should never happen
 			
 			uint16_t mode;
 			memcpy(&mode, &block_buf[4], 2);
 			if ((mode & S_IFDIR) == 0) {
 				//throw error, inode is not for directory
-				return -1;
+				return -EINVAL;
 			}
 			entry_header_start = 64;
 		}
 		else if (type_code == 3) {
-			if (first_block) return -1; //given block num is NOT inode block
+			if (first_block) return -EINVAL; //given block num is NOT inode block
 			entry_header_start = 4;
 		}
 		else { //throw error, wrong block type
-			return -1;
+			return -EINVAL;
 		}
 
-		uint32_t next_extents;
 		memcpy(&next_extents, &block_buf[4092], 4); //last four bytes of block
-		uint16_t dir_entry_len;
-		uint32_t dir_entry_inode;
-		char *dir_entry_name_buf = (char *) calloc(4086, sizeof(char)); //hard-coded max length of name
-		unsigned char *dir_entry = &block_buf[entry_header_start];
+		dir_entry = &block_buf[entry_header_start];
 		//int entrycount = 0;
 		
 		memcpy(&dir_entry_len, &dir_entry[0], 2);
@@ -246,26 +1177,31 @@ static int myreaddir(void *args, uint32_t block_num, void *buf, CPE453_readdir_c
 				memcpy(&dir_entry_len, &dir_entry[0], 2);
 			}
 			else {
-				free(dir_entry_name_buf);
 				//printf("finished reading at block num %d\n", bnum);
 				break;
 			}
 		}
 		bnum = next_extents;
 	}
+	free(dir_entry_name_buf);
     return 0;
 }
 
 static int myopen(void *args, uint32_t block_num)
 {
 	struct Args *fs = (struct Args*)args;
+	printf("MYOPEN %d\n", block_num);
 	unsigned char block_buf[4096];
 	readblock(fs->fd, block_buf, block_num);
 	uint32_t type_code;
 	memcpy(&type_code, &block_buf[0], 4);
-	if (type_code != 2) { //anything else to check?
-		//throw error
-		return -1;
+	uint16_t mode;
+	memcpy(&mode, &block_buf[4], 2);
+	if (type_code != 2) {
+		return -EINVAL;
+	}
+	else if (mode & S_IFDIR) {
+		return -EINVAL;
 	}
     return 0;
 }
@@ -275,6 +1211,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 	if ((!size) || (!buf)) return 0;
 	
 	struct Args *fs = (struct Args*)args;
+	printf("MYREAD %d\n", block_num);
 
 	int first_block = 1;
 	unsigned char block_buf[4096];
@@ -297,13 +1234,13 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 			memcpy(&mode, &block_buf[4], 2);
 			if ((mode & S_IFREG) == 0) {
 				//throw error, inode is not regular file
-				return -1;
+				return -EINVAL;
 			}
 			contents_start = 64;
 		}
 		else if (type_code == 4) {
 			if (first_block) {
-				return -1; //given block num is NOT inode block
+				return -EINVAL; //given block num is NOT inode block
 				// alternative: redirect back to file inode
 				// memcpy(&bnum, &block_buf[4], 4);
 				// continue;
@@ -311,7 +1248,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 			contents_start = 8;
 		}
 		else { //throw error, wrong block type
-			return -1;
+			return -EINVAL;
 		}
 
 		uint32_t next_extents;
@@ -357,6 +1294,7 @@ static int myread(void *args, uint32_t block_num, char *buf, size_t size, off_t 
 static int myreadlink(void *args, uint32_t block_num, char *buf, size_t size)
 {
 	struct Args *fs = (struct Args*)args;
+	printf("MYREADLINK %d\n", block_num);
 
 	unsigned char block_buf[4096];
 	readblock(fs->fd, block_buf, block_num);
@@ -364,9 +1302,9 @@ static int myreadlink(void *args, uint32_t block_num, char *buf, size_t size)
 	uint16_t mode;
 	memcpy(&mode, &block_buf[4], 2);
 	memcpy(&type_code, &block_buf[0], 4);
-	if (type_code != 2) return -1; //verify that given block num is inode
+	if (type_code != 2) return -EINVAL; //verify that given block num is inode
 
-	if ((mode & S_IFLNK) == 0) return -1; //given block is not symlink
+	if ((mode & S_IFLNK) == 0) return -EINVAL; //given block is not symlink
 
 	uint64_t path_size;
 	memcpy(&path_size, &block_buf[48], 8);
